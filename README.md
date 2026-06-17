@@ -9,7 +9,7 @@ This version focuses on the core workflow:
 - Apply artwork to a Steam app through Steam's frontend artwork API.
 - Download Steam app icons into Steam's library cache through the Lua backend.
 
-The original plugin also includes context-menu routing, shortcut VDF icon editing, local file selection, invisible assets, logo positioning, square capsules, and recent-game capsule patches. Those are planned follow-up ports because Millennium exposes different frontend and backend integration points than Decky.
+The original plugin also includes context-menu routing, shortcut VDF icon editing, local file selection, invisible assets, logo positioning, square capsules, and recent-game capsule patches. Those are planned follow-up ports because Millennium exposes different frontend and backend integration points than the original loader.
 
 ## Building
 
