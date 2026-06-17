@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/SteamClientHomebrew/Millennium/main/src/sys/plugin-schema.json",
+  "name": "steamgriddb",
+  "common_name": "SteamGridDB",
+  "description": "Browse and apply SteamGridDB artwork from Millennium.",
+  "version": "0.1.0",
+  "backendType": "lua",
+  "frontend": "frontend",
+  "backend": "backend",
+  "useBackend": true
+}
