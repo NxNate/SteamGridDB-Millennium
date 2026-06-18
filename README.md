@@ -1,6 +1,6 @@
 # SteamGridDB for Millennium
 
-An early Millennium of the SteamGridDB plugin.
+An early Millennium Port of the SteamGridDB plugin.
 
 This version focuses on the core workflow:
 
