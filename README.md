@@ -5,7 +5,7 @@ An early Millennium Port of the SteamGridDB plugin.
 This version focuses on the core workflow:
 
 - Search SteamGridDB games.
-- Browse capsules, wide capsules, heroes, logos, and icons.
+- Browse grids, wide grids, heroes, logos, and icons.
 - Apply artwork to a Steam app through Steam's frontend artwork API.
 - Download Steam app icons into Steam's library cache through the Lua backend.
 
