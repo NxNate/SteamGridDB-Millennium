@@ -46,7 +46,7 @@ local function run_powershell(script)
         return nil
     end
 
-    local command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' .. script_path .. '"'
+    local command = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' .. script_path .. '"'
     local output, status = utils.exec(command)
     if not output then
         logger:error("PowerShell command failed: " .. tostring(status))
@@ -109,7 +109,7 @@ local function steam_library_cache()
     return fs.join(millennium.steam_path(), "appcache", "librarycache")
 end
 
-function set_steam_icon_from_url(appid, url)
+function set_steam_icon_from_url(appid, url, extension)
     local cache_dir = steam_library_cache()
     if not fs.exists(cache_dir) then
         local ok, err = fs.create_directories(cache_dir)
@@ -119,22 +119,53 @@ function set_steam_icon_from_url(appid, url)
         end
     end
 
-    local icon_path = fs.join(cache_dir, tostring(appid) .. "_icon.jpg")
+    url = tostring(url or "")
+    extension = tostring(extension or ""):lower()
+    if extension == "" then
+        extension = string.match(url, "%.([A-Za-z0-9]+)%??[^/]*$") or "png"
+        extension = tostring(extension):lower()
+    end
+
+    local steam_path = millennium.steam_path()
+    local userdata_path = fs.join(steam_path, "userdata")
+    if not fs.exists(userdata_path) then
+        logger:error("Steam userdata folder was not found: " .. tostring(userdata_path))
+        return false
+    end
+
+    local base_name = tostring(appid) .. "_icon"
+    local file_name = base_name .. "." .. extension
+    local icon_path = fs.join(cache_dir, file_name)
     local script = table.concat({
         "$ProgressPreference = 'SilentlyContinue'",
+        "$ErrorActionPreference = 'Stop'",
+        "$userdata = " .. ps_quote(userdata_path),
+        "$baseName = " .. ps_quote(base_name),
+        "$fileName = " .. ps_quote(file_name),
+        "$cacheTarget = " .. ps_quote(icon_path),
         "$wc = [System.Net.WebClient]::new()",
         "$wc.Headers.Add('User-Agent', " .. ps_quote(USER_AGENT) .. ")",
-        "$wc.DownloadFile(" .. ps_quote(url) .. ", " .. ps_quote(icon_path) .. ")",
-        "Write-Output 'ok'"
+        "$bytes = $wc.DownloadData(" .. ps_quote(url) .. ")",
+        "[System.IO.File]::WriteAllBytes($cacheTarget, $bytes)",
+        "$gridDirs = Get-ChildItem -LiteralPath $userdata -Directory | ForEach-Object { Join-Path $_.FullName 'config\\grid' }",
+        "$written = @($cacheTarget)",
+        "foreach ($gridDir in $gridDirs) {",
+        "  if (!(Test-Path -LiteralPath $gridDir)) { New-Item -ItemType Directory -Force -Path $gridDir | Out-Null }",
+        "  Get-ChildItem -LiteralPath $gridDir -File -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -eq $baseName } | Remove-Item -Force -ErrorAction SilentlyContinue",
+        "  $target = Join-Path $gridDir $fileName",
+        "  [System.IO.File]::WriteAllBytes($target, $bytes)",
+        "  $written += $target",
+        "}",
+        "Write-Output ($written -join '|')"
     }, "; ")
 
     local result = run_powershell(script)
-    if result ~= "ok" then
+    if not result or result == "" then
         logger:error("Icon download/write failed")
         return false
     end
 
-    return icon_path
+    return result
 end
 
 function set_animated_artwork_from_url(appid, asset_type, url, extension)
@@ -223,29 +254,133 @@ function get_current_artwork(appid)
         return "{}"
     end
 
-    local script = table.concat({
-        "$ErrorActionPreference = 'SilentlyContinue'",
-        "$userdata = " .. ps_quote(userdata_path),
-        "$appid = " .. ps_quote(appid),
-        "$patterns = @{ grid_p = @($appid + 'p.*'); grid_l = @($appid + '.*'); hero = @($appid + '_hero.*'); logo = @($appid + '_logo.*'); icon = @($appid + '_icon.*') }",
-        "$result = [ordered]@{}",
-        "$gridDirs = Get-ChildItem -LiteralPath $userdata -Directory | ForEach-Object { Join-Path $_.FullName 'config\\grid' } | Where-Object { Test-Path -LiteralPath $_ }",
-        "foreach ($key in $patterns.Keys) {",
-        "  $files = @()",
-        "  foreach ($gridDir in $gridDirs) { foreach ($pattern in $patterns[$key]) { $files += Get-ChildItem -LiteralPath $gridDir -File -Filter $pattern -ErrorAction SilentlyContinue } }",
-        "  if ($key -eq 'grid_l') { $files = $files | Where-Object { $_.BaseName -eq $appid } }",
-        "  $file = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1",
-        "  if ($file) { $result[$key] = @{ path = $file.FullName; modified = $file.LastWriteTimeUtc.ToString('o'); length = $file.Length } }",
-        "}",
-        "$result | ConvertTo-Json -Compress"
-    }, "; ")
-
-    local result = run_powershell(script)
-    if not result or result == "" then
-        return "{}"
+    local function asset_key(stem)
+        if stem == appid .. "p" then
+            return "grid_p"
+        end
+        if stem == appid then
+            return "grid_l"
+        end
+        if stem == appid .. "_hero" then
+            return "hero"
+        end
+        if stem == appid .. "_logo" then
+            return "logo"
+        end
+        if stem == appid .. "_icon" then
+            return "icon"
+        end
+        return nil
     end
 
-    return result
+    local function mime_for(ext)
+        ext = string.lower(tostring(ext or ""))
+        if ext == ".jpg" or ext == ".jpeg" then
+            return "image/jpeg"
+        end
+        if ext == ".png" then
+            return "image/png"
+        end
+        if ext == ".webp" then
+            return "image/webp"
+        end
+        if ext == ".gif" then
+            return "image/gif"
+        end
+        if ext == ".ico" then
+            return "image/x-icon"
+        end
+        return "application/octet-stream"
+    end
+
+    local found = {}
+    local function remember_artwork(key, file_entry)
+        if not key or not file_entry or not file_entry.path then
+            return
+        end
+
+        local modified = fs.last_write_time(file_entry.path) or 0
+        if not found[key] or modified > found[key].modified_sort then
+            local length = fs.file_size(file_entry.path) or file_entry.size or 0
+            found[key] = {
+                path = file_entry.path,
+                modified = tostring(modified),
+                modified_sort = modified,
+                length = length,
+                extension = fs.extension(file_entry.path) or "",
+            }
+        end
+    end
+
+    local users = fs.list(userdata_path) or {}
+    for _, user_entry in ipairs(users) do
+        if user_entry.is_directory then
+            local grid_dir = fs.join(user_entry.path, "config", "grid")
+            if fs.exists(grid_dir) then
+                local files = fs.list(grid_dir) or {}
+                for _, file_entry in ipairs(files) do
+                    if file_entry.is_file then
+                        local stem = fs.stem(file_entry.path)
+                        local key = asset_key(stem)
+                        if key then
+                            remember_artwork(key, file_entry)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local cache_dir = steam_library_cache()
+    if fs.exists(cache_dir) then
+        local fallback_stems = {
+            [appid .. "_library_600x900"] = "grid_p",
+            [appid .. "_library_600x900_2x"] = "grid_p",
+            [appid .. "_portrait"] = "grid_p",
+            [appid .. "_header"] = "grid_l",
+            [appid .. "_library_header"] = "grid_l",
+            [appid .. "_library_hero"] = "hero",
+            [appid .. "_hero"] = "hero",
+            [appid .. "_logo"] = "logo",
+            [appid .. "_icon"] = "icon",
+        }
+
+        local cache_files = fs.list(cache_dir) or {}
+        for _, file_entry in ipairs(cache_files) do
+            if file_entry.is_file then
+                local stem = fs.stem(file_entry.path)
+                local key = fallback_stems[stem]
+                if key and not found[key] then
+                    remember_artwork(key, file_entry)
+                end
+            end
+        end
+    end
+
+    local order = { "grid_p", "grid_l", "hero", "logo", "icon" }
+    local parts = {}
+    for _, key in ipairs(order) do
+        local item = found[key]
+        if item then
+            local fields = {
+                '"path":"' .. json_escape(item.path) .. '"',
+                '"modified":"' .. json_escape(item.modified) .. '"',
+                '"length":' .. tostring(item.length or 0),
+            }
+
+            if (item.length or 0) <= 12582912 then
+                local content = utils.read_file(item.path)
+                if content and content ~= "" then
+                    local data_url = "data:" .. mime_for(item.extension) .. ";base64," .. utils.base64_encode(content)
+                    table.insert(fields, '"dataUrl":"' .. json_escape(data_url) .. '"')
+                end
+            end
+
+            table.insert(parts, '"' .. key .. '":{' .. table.concat(fields, ",") .. "}")
+        end
+    end
+
+    return "{" .. table.concat(parts, ",") .. "}"
 end
 
 function open_external_url(url)

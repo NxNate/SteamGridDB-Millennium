@@ -1,5 +1,5 @@
 import { DialogButton, Focusable, GamepadButton, SliderField, Spinner } from '@steambrew/client';
-import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
+import { Dispatch, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AssetState, CurrentArtworkState, EndState, FilterState, LoadingState, PageState, SGDBAsset, SGDBAssetType, ZoomState } from '../index';
 
 type ViewProps = {
@@ -20,12 +20,13 @@ type ViewProps = {
   applyAsset: (asset: SGDBAsset, type: SGDBAssetType) => Promise<void>;
   openAssetPage: (asset: SGDBAsset, type: SGDBAssetType) => Promise<void>;
   showExternalLinks: boolean;
+  showCreatorNames: boolean;
   loadAssets: (type: SGDBAssetType, nextPage?: number, append?: boolean) => Promise<void>;
   resetCurrentTab: () => void;
   resetArtwork: (type: SGDBAssetType) => Promise<void>;
-  isGamepadUI?: boolean;
   currentArtwork: CurrentArtworkState;
   refreshCurrentArtwork: () => Promise<void>;
+  isGamepadUI?: boolean;
 };
 
 const ASSET_LABEL: Record<SGDBAssetType, string> = {
@@ -39,12 +40,19 @@ const ASSET_LABEL: Record<SGDBAssetType, string> = {
 const tabs = Object.keys(ASSET_LABEL) as SGDBAssetType[];
 type ViewTab = SGDBAssetType | 'manage';
 const viewTabs: ViewTab[] = [...tabs, 'manage'];
+const VIEW_LABEL: Record<ViewTab, string> = {
+  ...ASSET_LABEL,
+  manage: 'MANAGE',
+};
+type FocusZone = 'tabs' | 'content';
 const isAnimatedAsset = (src: string) => /\.(webm|mp4)(\?|$)/i.test(src);
 const DEFAULT_VISIBLE_ROWS = 7;
 
 const assetGridStyle = (assetType: SGDBAssetType, zoom: number) => {
   if (assetType === 'hero' || assetType === 'logo') {
-    const columns = Math.max(2, Math.min(6, zoom));
+    const minColumns = assetType === 'hero' ? 3.45 : 2;
+    const maxColumns = assetType === 'hero' ? 6.45 : 6;
+    const columns = Math.max(minColumns, Math.min(maxColumns, zoom));
     return { gridTemplateColumns: `repeat(auto-fill, minmax(calc(${100 / columns}% - 10px), 1fr))` };
   }
 
@@ -52,9 +60,9 @@ const assetGridStyle = (assetType: SGDBAssetType, zoom: number) => {
 };
 
 const sliderLimits = (assetType: SGDBAssetType) => ({
-  min: assetType === 'hero' ? 2 : assetType === 'logo' ? 2 : assetType === 'grid_l' ? 160 : 100,
-  max: assetType === 'hero' ? 4 : assetType === 'logo' ? 6 : assetType === 'grid_l' ? 640 : assetType === 'grid_p' ? 300 : 200,
-  step: assetType === 'hero' || assetType === 'logo' ? 1 : 5,
+  min: assetType === 'hero' ? 3.45 : assetType === 'logo' ? 2 : assetType === 'grid_l' ? 160 : 100,
+  max: assetType === 'hero' ? 6.45 : assetType === 'logo' ? 6 : assetType === 'grid_l' ? 640 : assetType === 'grid_p' ? 300 : 200,
+  step: assetType === 'hero' ? 0.25 : assetType === 'logo' ? 1 : 5,
 });
 
 const AssetPreview = ({ asset, assetType }: { asset: SGDBAsset; assetType: SGDBAssetType }) => {
@@ -98,11 +106,11 @@ const ManagePreview = ({ item, assetType }: { item?: CurrentArtworkState[SGDBAss
     return <div className="sgdbManageMissing">Not set</div>;
   }
 
-  const src = fileUrl(item.path);
+  const src = item.dataUrl || fileUrl(item.path);
   return (
-    <div className={`sgdbManagePreview type-${assetType}`}>
-      <img className={`sgdbMedia ${assetType}`} src={src} alt="" />
-    </div>
+    <Focusable className={`sgdbManagePreview type-${assetType}`} role="button">
+      <img className={`sgdbManageImage type-${assetType}`} src={src} alt="" />
+    </Focusable>
   );
 };
 
@@ -124,15 +132,21 @@ export const GamepadView = ({
   applyAsset,
   openAssetPage,
   showExternalLinks,
+  showCreatorNames,
   loadAssets,
   resetCurrentTab,
   resetArtwork,
-  isGamepadUI = true,
   currentArtwork,
   refreshCurrentArtwork,
+  isGamepadUI = true,
 }: ViewProps) => {
   const gridRef = useRef<HTMLDivElement | null>(null);
+  const activeTabRef = useRef<ViewTab>(assetType);
+  const internalTabChangeRef = useRef(false);
+  const lastBumperAtRef = useRef(0);
+  const pendingArtworkFocusRef = useRef(true);
   const [activeTab, setActiveTab] = useState<ViewTab>(assetType);
+  const [focusZone, setFocusZone] = useState<FocusZone>('content');
   const [visibleRowsByType, setVisibleRowsByType] = useState<Record<SGDBAssetType, number>>({
     grid_p: DEFAULT_VISIBLE_ROWS,
     grid_l: DEFAULT_VISIBLE_ROWS,
@@ -140,13 +154,21 @@ export const GamepadView = ({
     logo: DEFAULT_VISIBLE_ROWS,
     icon: DEFAULT_VISIBLE_ROWS,
   });
-  const [columnCount, setColumnCount] = useState(1);
+  const [columnCountByType, setColumnCountByType] = useState<Record<SGDBAssetType, number>>({
+    grid_p: 1,
+    grid_l: 1,
+    hero: 1,
+    logo: 1,
+    icon: 1,
+  });
   const tabAssets = assetsByType[assetType];
   const tabLoading = loadingByType[assetType];
   const tabEndReached = endReachedByType[assetType];
-  const tabGridStyle = assetGridStyle(assetType, zoomByType[assetType]);
   const slider = sliderLimits(assetType);
-  const sliderProgress = ((zoomByType[assetType] - slider.min) / (slider.max - slider.min)) * 100;
+  const currentZoom = Math.max(slider.min, Math.min(slider.max, zoomByType[assetType]));
+  const tabGridStyle = assetGridStyle(assetType, currentZoom);
+  const sliderProgress = ((currentZoom - slider.min) / (slider.max - slider.min)) * 100;
+  const columnCount = columnCountByType[assetType];
   const rawVisibleLimit = visibleRowsByType[assetType] * columnCount;
   const rawVisibleCount = Math.min(tabAssets.length, rawVisibleLimit);
   const hasMoreAfterRawVisible = tabAssets.length > rawVisibleCount || !tabEndReached;
@@ -157,14 +179,106 @@ export const GamepadView = ({
   const hasHiddenLoadedAssets = tabAssets.length > visibleAssets.length;
   const canShowMore = tabAssets.length > 0 && (hasHiddenLoadedAssets || !tabEndReached);
   const isManageTab = activeTab === 'manage';
-  const selectTab = (tab: ViewTab) => {
+  const selectTab = useCallback((tab: ViewTab) => {
+    activeTabRef.current = tab;
     setActiveTab(tab);
-    if (tab !== 'manage') {
-      setAssetType(tab);
-    } else {
+    internalTabChangeRef.current = true;
+    pendingArtworkFocusRef.current = true;
+    setFocusZone('content');
+    if (tab === 'manage') {
       void refreshCurrentArtwork();
+      return;
     }
-  };
+    setAssetType(tab);
+  }, [refreshCurrentArtwork, setAssetType]);
+  const selectRelativeTab = useCallback((direction: 1 | -1) => {
+    const index = viewTabs.indexOf(activeTabRef.current);
+    const next = viewTabs[(index + direction + viewTabs.length) % viewTabs.length];
+    selectTab(next);
+  }, [selectTab]);
+  const handleTabBumper = useCallback((event: CustomEvent<{ button: number }>) => {
+    const isLeft = event.detail.button === GamepadButton.BUMPER_LEFT;
+    const isRight = event.detail.button === GamepadButton.BUMPER_RIGHT;
+    if (!isLeft && !isRight) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const now = Date.now();
+    if (now - lastBumperAtRef.current < 180) {
+      return;
+    }
+    lastBumperAtRef.current = now;
+
+    if (isLeft) {
+      event.preventDefault();
+      event.stopPropagation();
+      selectRelativeTab(-1);
+    }
+
+    if (isRight) {
+      event.preventDefault();
+      event.stopPropagation();
+      selectRelativeTab(1);
+    }
+  }, [selectRelativeTab]);
+  const clearTabFocusArtifacts = useCallback(() => {
+    document.querySelectorAll<HTMLElement>('.sgdbGamepadTab.gpfocus, .sgdbGamepadTab:focus').forEach((tab) => {
+      tab.classList.remove('gpfocus');
+      tab.blur();
+    });
+  }, []);
+  const focusFirstAssetAfterApply = useCallback(() => {
+    if (!isGamepadUI) {
+      return;
+    }
+
+    let attempts = 0;
+    const restoreFocus = () => {
+      attempts += 1;
+      clearTabFocusArtifacts();
+      const target = gridRef.current?.querySelector<HTMLElement>('.image-wrap.sgdbAsset');
+
+      if (!target) {
+        if (attempts < 8) {
+          window.setTimeout(restoreFocus, 50);
+        } else {
+          pendingArtworkFocusRef.current = true;
+        }
+        return;
+      }
+
+      setFocusZone('content');
+      target.setAttribute('tabindex', '0');
+      if (document.activeElement instanceof HTMLElement && document.activeElement !== target) {
+        document.activeElement.blur();
+      }
+      target.focus();
+    };
+
+    [80, 180, 360, 700, 1100].forEach((delay) => {
+      window.setTimeout(() => {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(restoreFocus));
+      }, delay);
+    });
+  }, [clearTabFocusArtifacts, isGamepadUI]);
+  const applyAssetAndRestoreFocus = useCallback(async (asset: SGDBAsset, type: SGDBAssetType) => {
+    activeTabRef.current = type;
+    pendingArtworkFocusRef.current = false;
+    setFocusZone('content');
+
+    try {
+      await applyAsset(asset, type);
+    } finally {
+      activeTabRef.current = type;
+      internalTabChangeRef.current = false;
+      pendingArtworkFocusRef.current = true;
+      setFocusZone('content');
+      focusFirstAssetAfterApply();
+    }
+  }, [applyAsset, focusFirstAssetAfterApply]);
   const showMoreAssets = () => {
     if (tabLoading) {
       return;
@@ -183,46 +297,103 @@ export const GamepadView = ({
   };
 
   useEffect(() => {
-    setVisibleRowsByType((current) => ({ ...current, [assetType]: DEFAULT_VISIBLE_ROWS }));
-  }, [assetType, filters]);
+    setVisibleRowsByType({
+      grid_p: DEFAULT_VISIBLE_ROWS,
+      grid_l: DEFAULT_VISIBLE_ROWS,
+      hero: DEFAULT_VISIBLE_ROWS,
+      logo: DEFAULT_VISIBLE_ROWS,
+      icon: DEFAULT_VISIBLE_ROWS,
+    });
+  }, [filters]);
 
   useEffect(() => {
-    if (activeTab !== 'manage' && activeTab !== assetType) {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (internalTabChangeRef.current) {
+      internalTabChangeRef.current = false;
+      return;
+    }
+
+    if (activeTab !== assetType) {
+      activeTabRef.current = assetType;
       setActiveTab(assetType);
     }
   }, [activeTab, assetType]);
+
+  useEffect(() => {
+    if (!isGamepadUI || !pendingArtworkFocusRef.current || tabLoading || visibleAssets.length === 0) {
+      return;
+    }
+
+    pendingArtworkFocusRef.current = false;
+    let attempts = 0;
+    const focusFirstAsset = () => {
+      attempts += 1;
+      clearTabFocusArtifacts();
+      const target = gridRef.current?.querySelector<HTMLElement>('.image-wrap.sgdbAsset');
+      if (!target) {
+        if (attempts < 8) {
+          window.setTimeout(focusFirstAsset, 50);
+        } else {
+          pendingArtworkFocusRef.current = true;
+        }
+        return;
+      }
+
+      setFocusZone('content');
+      target.setAttribute('tabindex', '0');
+      if (document.activeElement instanceof HTMLElement && document.activeElement !== target) {
+        document.activeElement.blur();
+      }
+      target.focus();
+    };
+
+    window.requestAnimationFrame(() => window.requestAnimationFrame(focusFirstAsset));
+  }, [assetType, clearTabFocusArtifacts, isGamepadUI, tabLoading, visibleAssets.length]);
 
   useEffect(() => {
     const grid = gridRef.current;
     if (!grid) return undefined;
 
     const updateColumns = () => {
-      const columns = window.getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length;
-      setColumnCount(Math.max(1, columns));
+      const firstRowTop = grid.querySelector<HTMLElement>('.asset-box-wrap')?.offsetTop;
+      const rowColumns = firstRowTop === undefined
+        ? 0
+        : Array.from(grid.querySelectorAll<HTMLElement>('.asset-box-wrap')).filter((child) => Math.abs(child.offsetTop - firstRowTop) <= 2).length;
+      const cssColumns = window.getComputedStyle(grid).gridTemplateColumns.split(' ').filter((track) => track && track !== 'none').length;
+      const columns = Math.max(rowColumns, cssColumns, 1);
+      setColumnCountByType((current) => current[assetType] === columns ? current : { ...current, [assetType]: columns });
     };
 
-    updateColumns();
+    let frame = window.requestAnimationFrame(() => {
+      updateColumns();
+      frame = window.requestAnimationFrame(updateColumns);
+    });
     const observer = new ResizeObserver(updateColumns);
     observer.observe(grid);
-    return () => observer.disconnect();
-  }, [assetType, zoomByType]);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [assetType, visibleAssets.length, zoomByType]);
 
   return (
     <>
-      <Focusable className="sgdbManualTabs sgdbGamepadTabs" flow-children="row">
+      <div className="sgdbManualTabs sgdbGamepadTabs">
         {viewTabs.map((tab) => (
-          <Focusable
+          <button
             key={tab}
-            className={`sgdbGamepadTab sgdbTextPill ${tab === activeTab ? 'selected' : ''} ${tab === 'manage' ? 'sgdbManageTab' : ''}`}
-            onActivate={() => selectTab(tab)}
+            className={`sgdbGamepadTab sgdbTextPill ${tab === activeTab ? 'selected' : ''} ${tab === activeTab && focusZone === 'tabs' ? 'tabFocus' : 'contentFocus'}`}
+            type="button"
+            tabIndex={-1}
             onClick={() => selectTab(tab)}
-            onOKActionDescription={tab === 'manage' ? 'MANAGE' : ASSET_LABEL[tab]}
-            role="button"
           >
-            {tab === 'manage' ? 'MANAGE' : ASSET_LABEL[tab]}
-          </Focusable>
+            {VIEW_LABEL[tab]}
+          </button>
         ))}
-      </Focusable>
+      </div>
 
       <div className="tabcontents-wrap">
         <div className={`spinnyboi ${!tabLoading ? 'loaded' : ''}`}>
@@ -230,7 +401,7 @@ export const GamepadView = ({
         </div>
 
         {isManageTab ? (
-          <Focusable className="sgdbManageGrid" flow-children="right">
+          <Focusable className="sgdbManageGrid" flow-children="right" onButtonDown={handleTabBumper}>
             <section className="sgdbManagePanel sgdbManagePanelCapsule">
               <h2>Current Grid</h2>
               <ManagePreview item={currentArtwork.grid_p} assetType="grid_p" />
@@ -239,13 +410,13 @@ export const GamepadView = ({
               <h2>Current Wide Grid</h2>
               <ManagePreview item={currentArtwork.grid_l} assetType="grid_l" />
             </section>
-            <section className="sgdbManagePanel sgdbManagePanelHero">
-              <h2>Current Hero</h2>
-              <ManagePreview item={currentArtwork.hero} assetType="hero" />
-            </section>
             <section className="sgdbManagePanel sgdbManagePanelLogo">
               <h2>Current Logo</h2>
               <ManagePreview item={currentArtwork.logo} assetType="logo" />
+            </section>
+            <section className="sgdbManagePanel sgdbManagePanelHero">
+              <h2>Current Hero</h2>
+              <ManagePreview item={currentArtwork.hero} assetType="hero" />
             </section>
             <section className="sgdbManagePanel sgdbManagePanelIcon">
               <h2>Current Icon</h2>
@@ -255,7 +426,7 @@ export const GamepadView = ({
         ) : (
           <>
         {isGamepadUI ? (
-          <Focusable className="sgdb-asset-toolbar" flow-children="row">
+          <Focusable className="sgdb-asset-toolbar" flow-children="row" onGamepadFocus={() => setFocusZone('content')} onMouseEnter={() => setFocusZone('content')} onButtonDown={handleTabBumper}>
             <Focusable className="filter-buttons" flow-children="row">
               <Focusable
                 className={`sgdbFilterMainButton sgdbTextPill ${filtersOpen ? 'selected' : ''}`}
@@ -270,7 +441,7 @@ export const GamepadView = ({
             <div className="sgdbSliderWithMarks">
               <SliderField
                 className="size-slider"
-                value={zoomByType[assetType]}
+                value={currentZoom}
                 min={slider.min}
                 max={slider.max}
                 step={slider.step}
@@ -294,7 +465,7 @@ export const GamepadView = ({
               <input
                 className="sgdbDesktopSlider"
                 type="range"
-                value={zoomByType[assetType]}
+                value={currentZoom}
                 min={slider.min}
                 max={slider.max}
                 step={slider.step}
@@ -337,24 +508,24 @@ export const GamepadView = ({
           {tabLoading ? 'Loading' : `${tabAssets.length} ${ASSET_LABEL[assetType].toLowerCase()} results`}
         </button>
 
-        <Focusable ref={gridRef} id="images-container" className={`sgdbGrid ${assetType}`} style={tabGridStyle} flow-children="right">
+        <Focusable key={assetType} ref={gridRef} id="images-container" className={`sgdbGrid ${assetType}`} style={tabGridStyle} flow-children="right" onGamepadFocus={() => setFocusZone('content')} onMouseEnter={() => setFocusZone('content')} onButtonDown={handleTabBumper}>
           {!tabLoading && visibleAssets.map((asset) => (
-            <div className="asset-box-wrap" key={asset.id}>
+            <div className="asset-box-wrap" key={`${assetType}-${asset.id}`}>
               {(() => {
                 const animated = isAnimatedAsset(asset.url) || isAnimatedAsset(asset.thumb);
                 return (
               <Focusable
                 className={`image-wrap sgdbAsset type-${assetType}`}
+                tabIndex={0}
                 style={{ paddingBottom: `${asset.width === asset.height ? 100 : (asset.height / asset.width) * 100}%` }}
-                onActivate={() => applyAsset(asset, assetType)}
-                onClick={() => applyAsset(asset, assetType)}
+                onActivate={() => void applyAssetAndRestoreFocus(asset, assetType)}
+                onClick={() => void applyAssetAndRestoreFocus(asset, assetType)}
                 onOKActionDescription={`Apply ${ASSET_LABEL[assetType]}`}
                 onSecondaryActionDescription="Filter"
                 onSecondaryButton={() => setFiltersOpen((open) => !open)}
-                actionDescriptionMap={{
-                  [GamepadButton.BUMPER_LEFT]: 'Previous Tab',
-                  [GamepadButton.BUMPER_RIGHT]: 'Next Tab',
-                }}
+                onGamepadFocus={() => setFocusZone('content')}
+                onMouseEnter={() => setFocusZone('content')}
+                onButtonDown={handleTabBumper}
                 role="button"
               >
                 <AssetPreview asset={asset} assetType={assetType} />
@@ -389,7 +560,7 @@ export const GamepadView = ({
               </Focusable>
                 );
               })()}
-              {asset.author?.name ? <div className="author"><span>{asset.author.name}</span></div> : null}
+              {showCreatorNames && asset.author?.name ? <div className="author"><span>{asset.author.name}</span></div> : null}
             </div>
           ))}
           {tabAssets.length === 0 && !tabLoading ? (
@@ -405,10 +576,16 @@ export const GamepadView = ({
             className={`sgdbMoreButton sgdbTextPill ${tabLoading ? 'disabled' : ''}`}
             onActivate={() => {
               showMoreAssets();
+              window.requestAnimationFrame(() => {
+                gridRef.current?.querySelector<HTMLElement>('.image-wrap.sgdbAsset')?.focus();
+              });
             }}
             onClick={() => {
               showMoreAssets();
             }}
+            onGamepadFocus={() => setFocusZone('content')}
+            onMouseEnter={() => setFocusZone('content')}
+            onButtonDown={handleTabBumper}
             onOKActionDescription="More"
             role="button"
           >

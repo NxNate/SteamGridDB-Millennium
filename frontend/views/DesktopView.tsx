@@ -17,6 +17,7 @@ type ViewProps = {
   setFiltersOpen: Dispatch<SetStateAction<boolean>>;
   applyingId: number | null;
   applyAsset: (asset: SGDBAsset, type: SGDBAssetType) => Promise<void>;
+  showCreatorNames?: boolean;
   loadAssets: (type: SGDBAssetType, nextPage?: number, append?: boolean) => Promise<void>;
   resetCurrentTab: () => void;
 };
@@ -33,14 +34,16 @@ const tabs = Object.keys(ASSET_LABEL) as SGDBAssetType[];
 const isAnimatedAsset = (src: string) => /\.(webm|mp4)(\?|$)/i.test(src);
 
 const sliderLimits = (assetType: SGDBAssetType) => ({
-  min: assetType === 'hero' ? 2 : assetType === 'logo' ? 2 : assetType === 'grid_l' ? 160 : 100,
-  max: assetType === 'hero' ? 4 : assetType === 'logo' ? 6 : assetType === 'grid_l' ? 280 : 200,
-  step: assetType === 'hero' || assetType === 'logo' ? 1 : 5,
+  min: assetType === 'hero' ? 3.45 : assetType === 'logo' ? 2 : assetType === 'grid_l' ? 160 : 100,
+  max: assetType === 'hero' ? 6.45 : assetType === 'logo' ? 6 : assetType === 'grid_l' ? 280 : 200,
+  step: assetType === 'hero' ? 0.25 : assetType === 'logo' ? 1 : 5,
 });
 
 const assetGridStyle = (assetType: SGDBAssetType, zoom: number) => {
   if (assetType === 'hero' || assetType === 'logo') {
-    const columns = Math.max(2, Math.min(6, zoom));
+    const minColumns = assetType === 'hero' ? 3.45 : 2;
+    const maxColumns = assetType === 'hero' ? 6.45 : 6;
+    const columns = Math.max(minColumns, Math.min(maxColumns, zoom));
     return { gridTemplateColumns: `repeat(auto-fill, minmax(calc(${100 / columns}% - 10px), 1fr))` };
   }
 
@@ -88,6 +91,7 @@ export const DesktopView = ({
   setFiltersOpen,
   applyingId,
   applyAsset,
+  showCreatorNames = true,
   loadAssets,
   resetCurrentTab,
 }: ViewProps) => {
@@ -173,22 +177,24 @@ export const DesktopView = ({
 
         <div id="images-container" className={`sgdbGrid ${assetType}`} style={tabGridStyle}>
           {!tabLoading && tabAssets.map((asset) => (
-            <button
-              className={`image-wrap sgdbAsset type-${assetType}`}
-              key={asset.id}
-              style={{ paddingBottom: `${asset.width === asset.height ? 100 : (asset.height / asset.width) * 100}%` }}
-              type="button"
-              onClick={() => applyAsset(asset, assetType)}
-            >
-              <AssetPreview asset={asset} assetType={assetType} />
-              <div className="sgdbChips">
-                {isAnimatedAsset(asset.url) || isAnimatedAsset(asset.thumb) ? <span className="animated">Animated</span> : null}
-                {asset.nsfw ? <span className="nsfw">Adult</span> : null}
-                {asset.humor ? <span className="humor">Humor</span> : null}
-                {asset.epilepsy ? <span className="epilepsy">Epilepsy</span> : null}
-              </div>
-              {applyingId === asset.id ? <div className="dload-overlay downloading"><Spinner /></div> : null}
-            </button>
+            <div className="asset-box-wrap" key={asset.id}>
+              <button
+                className={`image-wrap sgdbAsset type-${assetType}`}
+                style={{ paddingBottom: `${asset.width === asset.height ? 100 : (asset.height / asset.width) * 100}%` }}
+                type="button"
+                onClick={() => applyAsset(asset, assetType)}
+              >
+                <AssetPreview asset={asset} assetType={assetType} />
+                <div className="sgdbChips">
+                  {isAnimatedAsset(asset.url) || isAnimatedAsset(asset.thumb) ? <span className="animated">Animated</span> : null}
+                  {asset.nsfw ? <span className="nsfw">Adult</span> : null}
+                  {asset.humor ? <span className="humor">Humor</span> : null}
+                  {asset.epilepsy ? <span className="epilepsy">Epilepsy</span> : null}
+                </div>
+                {applyingId === asset.id ? <div className="dload-overlay downloading"><Spinner /></div> : null}
+              </button>
+              {showCreatorNames && asset.author?.name ? <div className="author"><span>{asset.author.name}</span></div> : null}
+            </div>
           ))}
           {tabAssets.length === 0 && !tabLoading ? (
             <div className="sgdbEmpty">

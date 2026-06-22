@@ -60,9 +60,18 @@ export type FilterState = {
   epilepsy: boolean;
 };
 export type ZoomState = Record<SGDBAssetType, number>;
+type FilterStateByType = Record<SGDBAssetType, FilterState>;
+export type CurrentArtworkItem = {
+  path: string;
+  dataUrl?: string;
+  modified?: string;
+  length?: number;
+};
+export type CurrentArtworkState = Partial<Record<SGDBAssetType, CurrentArtworkItem>>;
 type PluginSettings = {
   filterDefaults: FilterState;
   showExternalLinks: boolean;
+  showCreatorNames: boolean;
   preloadPages: number;
 };
 
@@ -77,17 +86,9 @@ type SGDBGame = {
   name: string;
 };
 
-export type CurrentArtworkItem = {
-  path: string;
-  modified?: string;
-  length?: number;
-};
-
-export type CurrentArtworkState = Partial<Record<SGDBAssetType, CurrentArtworkItem>>;
-
 const sgdbRequest = callable<[{ path: string }], string | false>('sgdb_request');
 const downloadAsBase64 = callable<[{ url: string }], string | false>('download_as_base64');
-const setSteamIconFromUrl = callable<[{ appid: number; url: string }], string | false>('set_steam_icon_from_url');
+const setSteamIconFromUrl = callable<[{ appid: number; url: string; extension: string }], string | false>('set_steam_icon_from_url');
 const setAnimatedArtworkFromUrl = callable<[{ appid: number; asset_type: SGDBAssetType; url: string; extension: string }], string | false>('set_animated_artwork_from_url');
 const getCurrentArtwork = callable<[{ appid: number }], string | false>('get_current_artwork');
 const openExternalUrl = callable<[{ url: string }], boolean>('open_external_url');
@@ -193,13 +194,14 @@ const defaultFilters: FilterState = {
 const defaultSettings: PluginSettings = {
   filterDefaults: defaultFilters,
   showExternalLinks: true,
+  showCreatorNames: true,
   preloadPages: 0,
 };
 
 const defaultZoom: ZoomState = {
   grid_p: 180,
   grid_l: 395,
-  hero: 3,
+  hero: 3.45,
   logo: 4,
   icon: 140,
 };
@@ -216,6 +218,7 @@ type ZoomModeState = {
 
 const ZOOM_STORAGE_KEY = 'steamgriddb:zoomByMode:v1';
 const SETTINGS_STORAGE_KEY = 'steamgriddb:settings:v1';
+const FILTER_STORAGE_KEY = 'steamgriddb:filtersByType:v1';
 
 const isZoomState = (value: unknown): value is ZoomState => {
   if (!value || typeof value !== 'object') {
@@ -255,9 +258,37 @@ const isFilterState = (value: unknown): value is FilterState => {
   return (['static', 'animated', 'adult', 'humor', 'epilepsy'] as (keyof FilterState)[]).every((key) => typeof (value as Partial<FilterState>)[key] === 'boolean');
 };
 
+const filterStateByType = (fallback: FilterState): FilterStateByType => ({
+  grid_p: { ...fallback },
+  grid_l: { ...fallback },
+  hero: { ...fallback },
+  logo: { ...fallback },
+  icon: { ...fallback },
+});
+
+const loadFiltersByType = (fallback: FilterState): FilterStateByType => {
+  const defaults = filterStateByType(fallback);
+
+  try {
+    const raw = window.localStorage.getItem(FILTER_STORAGE_KEY);
+    if (!raw) {
+      return defaults;
+    }
+
+    const saved = JSON.parse(raw) as Partial<Record<SGDBAssetType, unknown>>;
+    return tabs.reduce((current, tab) => ({
+      ...current,
+      [tab]: isFilterState(saved[tab]) ? { ...fallback, ...saved[tab] } : defaults[tab],
+    }), defaults);
+  } catch {
+    return defaults;
+  }
+};
+
 const normalizeSettings = (settings: Partial<PluginSettings>): PluginSettings => ({
   filterDefaults: isFilterState(settings.filterDefaults) ? { ...defaultFilters, ...settings.filterDefaults } : defaultSettings.filterDefaults,
   showExternalLinks: typeof settings.showExternalLinks === 'boolean' ? settings.showExternalLinks : defaultSettings.showExternalLinks,
+  showCreatorNames: typeof settings.showCreatorNames === 'boolean' ? settings.showCreatorNames : defaultSettings.showCreatorNames,
   preloadPages: Math.max(0, Math.min(5, Number.isFinite(settings.preloadPages) ? Math.trunc(settings.preloadPages as number) : defaultSettings.preloadPages)),
 });
 
@@ -400,7 +431,9 @@ const downloadAssetInBrowser = async (url: string): Promise<DownloadedAsset> => 
 
 export const assetGridStyle = (assetType: SGDBAssetType, zoom: number) => {
   if (assetType === 'hero' || assetType === 'logo') {
-    const columns = Math.max(2, Math.min(6, zoom));
+    const minColumns = assetType === 'hero' ? 3.45 : 2;
+    const maxColumns = assetType === 'hero' ? 6.45 : 6;
+    const columns = Math.max(minColumns, Math.min(maxColumns, zoom));
     return { gridTemplateColumns: `repeat(auto-fill, minmax(calc(${100 / columns}% - 10px), 1fr))` };
   }
 
@@ -468,6 +501,17 @@ const SettingsView = ({
           />
         </label>
         <label className="sgdbSettingsRow">
+          <span>Asset creator names</span>
+          <input
+            type="checkbox"
+            checked={settings.showCreatorNames}
+            onChange={(event) => {
+              const showCreatorNames = event.currentTarget.checked;
+              setSettings((current) => ({ ...current, showCreatorNames }));
+            }}
+          />
+        </label>
+        <label className="sgdbSettingsRow">
           <span>Additional pages to preload</span>
           <input
             type="number"
@@ -494,7 +538,7 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
   const [pagesByType, setPagesByType] = useState<PageState>(() => emptyPages());
   const [loadingByType, setLoadingByType] = useState<LoadingState>(() => emptyLoading());
   const [endReachedByType, setEndReachedByType] = useState<EndState>(() => emptyEnd());
-  const [filters, setFilters] = useState<FilterState>(() => settings.filterDefaults);
+  const [filtersByType, setFiltersByType] = useState<FilterStateByType>(() => loadFiltersByType(settings.filterDefaults));
   const [zoomByMode, setZoomByMode] = useState<ZoomModeState>(() => loadZoomByMode());
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [applyingId, setApplyingId] = useState<number | null>(null);
@@ -505,6 +549,7 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
   const isGamepadUI = uiMode === EUIMode.GamePad;
   const zoomModeKey = isGamepadUI ? 'gamepad' : 'desktop';
   const zoomByType = zoomByMode[zoomModeKey];
+  const filters = filtersByType[assetType] ?? settings.filterDefaults;
 
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
@@ -513,6 +558,10 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
   useEffect(() => {
     window.localStorage.setItem(ZOOM_STORAGE_KEY, JSON.stringify(zoomByMode));
   }, [zoomByMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filtersByType));
+  }, [filtersByType]);
 
   const setZoomByType = useCallback<Dispatch<SetStateAction<ZoomState>>>((action) => {
     setZoomByMode((current) => {
@@ -524,6 +573,36 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
       };
     });
   }, [zoomModeKey]);
+
+  const setFilters = useCallback<Dispatch<SetStateAction<FilterState>>>((action) => {
+    setFiltersByType((current) => {
+      const currentFilters = current[assetType] ?? settings.filterDefaults;
+      const nextFilters = typeof action === 'function' ? action(currentFilters) : action;
+      return {
+        ...current,
+        [assetType]: nextFilters,
+      };
+    });
+  }, [assetType, settings.filterDefaults]);
+
+  const refreshCurrentArtwork = useCallback(async () => {
+    if (!Number.isFinite(appId)) {
+      setCurrentArtwork({});
+      return;
+    }
+
+    const raw = await getCurrentArtwork({ appid: appId }).catch(() => false);
+    if (typeof raw !== 'string' || raw.length === 0) {
+      setCurrentArtwork({});
+      return;
+    }
+
+    try {
+      setCurrentArtwork(JSON.parse(raw) as CurrentArtworkState);
+    } catch {
+      setCurrentArtwork({});
+    }
+  }, [appId]);
 
   useEffect(() => {
     if (initialAppId) {
@@ -540,6 +619,10 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
       setAssetType(initialAssetType);
     }
   }, [initialAssetType]);
+
+  useEffect(() => {
+    void refreshCurrentArtwork();
+  }, [refreshCurrentArtwork]);
 
   useEffect(() => {
     let mounted = true;
@@ -611,29 +694,11 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
     }
   }, [appId, endReachedByType, filters, loadingByType, settings.preloadPages, sgdbGameId]);
 
-  const refreshCurrentArtwork = useCallback(async () => {
-    if (!Number.isFinite(appId)) {
-      setCurrentArtwork({});
-      return;
-    }
-
-    try {
-      const body = await getCurrentArtwork({ appid: appId });
-      setCurrentArtwork(body ? JSON.parse(body) as CurrentArtworkState : {});
-    } catch {
-      setCurrentArtwork({});
-    }
-  }, [appId]);
-
   useEffect(() => {
     if (!Number.isFinite(appId)) return;
     if (assetsByType[assetType].length > 0 || loadingByType[assetType] || endReachedByType[assetType]) return;
     void loadAssets(assetType, 0, false);
   }, [appId, assetType, assetsByType, endReachedByType, loadAssets, loadingByType]);
-
-  useEffect(() => {
-    void refreshCurrentArtwork();
-  }, [refreshCurrentArtwork]);
 
   useEffect(() => {
     if (isGamepadUI || !Number.isFinite(appId)) return;
@@ -648,12 +713,6 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
     setEndReachedByType((current) => ({ ...current, [assetType]: false }));
   }, [assetType]);
 
-  useEffect(() => {
-    setAssetsByType(emptyAssets());
-    setPagesByType(emptyPages());
-    setEndReachedByType(emptyEnd());
-  }, [filters]);
-
   const toggleFilter = (key: keyof FilterState) => {
     setFilters((current) => {
       const next = { ...current, [key]: !current[key] };
@@ -662,6 +721,7 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
       }
       return next;
     });
+    resetCurrentTab();
   };
 
   const applyAsset = useCallback(async (asset: SGDBAsset, type: SGDBAssetType) => {
@@ -672,17 +732,17 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
 
     setApplyingId(asset.id);
     try {
+      const extension = getAssetExtension(asset);
       if (type === 'icon') {
-        const savedPath = await setSteamIconFromUrl({ appid: appId, url: asset.url });
+        const savedPath = await setSteamIconFromUrl({ appid: appId, url: asset.url, extension });
         if (!savedPath) {
-          throw new Error('The icon could not be written to Steam library cache.');
+          throw new Error('The icon could not be written to Steam grid cache.');
         }
         notice('Icon Saved', 'Restart Steam if the icon does not refresh immediately.');
         void refreshCurrentArtwork();
         return;
       }
 
-      const extension = getAssetExtension(asset);
       const shouldDirectWriteAnimated = isAnimatedAsset(asset.thumb) || isDirectAnimatedExtension(extension);
       if (shouldDirectWriteAnimated) {
         const savedPath = await setAnimatedArtworkFromUrl({
@@ -773,12 +833,13 @@ const SteamGridDBContent = ({ initialAppId, initialAssetType, popout = false }: 
     applyAsset,
     openAssetPage,
     showExternalLinks: settings.showExternalLinks,
+    showCreatorNames: settings.showCreatorNames,
     loadAssets,
     resetCurrentTab,
     resetArtwork,
-    isGamepadUI,
     currentArtwork,
     refreshCurrentArtwork,
+    isGamepadUI,
   };
 
   return (
@@ -971,16 +1032,19 @@ const styles = `
   min-height: 0;
   margin-top: var(--basicui-header-height, 40px);
   padding: 0;
-  background: var(--gpSystemDarkestGrey, #0e141b);
+  background:
+    radial-gradient(1180px 760px at 52% 16%, rgba(17, 29, 38, 0.36), rgba(7, 12, 17, 0.18) 54%, transparent 84%),
+    linear-gradient(180deg, #05080b 0, #060a0e 96px, #070d12 210px, #091017 100%);
   overflow-x: hidden;
   box-sizing: border-box;
   overscroll-behavior: contain;
+  box-shadow: 0 calc(-1 * var(--basicui-header-height, 40px)) 0 #0a1218;
   --asset-size: 120px;
 }
 
 .sgdbRoot div[class*="gamepadtabbedpage_TabHeaderRowWrapper"][class*="gamepadtabbedpage_Floating"],
 .sgdbRoot div[class*="gamepadtabbedpage_TabHeaderRowWrapper"] {
-  background: #1b2838;
+  background: transparent;
 }
 
 .sgdbDesktop {
@@ -989,7 +1053,7 @@ const styles = `
 
 .sgdbDesktopToolbar {
   position: relative;
-  box-shadow: 0 calc(-1 * var(--basicui-header-height, 40px)) 0 #15222c;
+  box-shadow: 0 calc(-1 * var(--basicui-header-height, 40px)) 0 #0a1218;
 }
 
 .sgdbPopoutContent {
@@ -1067,10 +1131,13 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
 
 .sgdbTextPill {
   display: flex;
+  position: relative;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
   border: 0;
   border-radius: 999px;
+  clip-path: inset(0 round 999px);
   color: rgba(255, 255, 255, 0.9);
   background: transparent;
   outline: 0;
@@ -1083,20 +1150,22 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
 }
 
 .sgdbTextPill.selected {
-  color: #07111d;
-  background: #f8f8f4;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  color: #f7f9fb;
+  background: #2e333a;
+  box-shadow: none;
 }
 
 .sgdbTextPill.gpfocus,
 .sgdbTextPill:focus-visible {
   outline: 0 !important;
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.58);
+  border-radius: 999px !important;
+  clip-path: inset(0 round 999px) !important;
 }
 
 .sgdbTextPill.selected.gpfocus,
 .sgdbTextPill.selected:focus-visible {
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25), 0 0 0 2px rgba(255, 255, 255, 0.58);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.58);
 }
 
 .sgdbTextPill.gpfocus::before,
@@ -1122,37 +1191,108 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
 
 .sgdbGamepad .sgdbGamepadTabs {
   justify-content: center;
-  gap: 10px;
-  min-height: 48px;
-  padding: 0 36px;
-  background: #15222c;
-  border-bottom: 1px solid rgba(102, 192, 244, 0.08);
+  gap: 32px;
+  min-height: 54px;
+  padding: 3px 56px 0;
+  background: transparent;
+  border-bottom: 0;
 }
 
 .sgdbGamepad .sgdbGamepadTab {
-  min-width: 104px;
-  width: 104px;
-  height: 34px;
-  padding: 0 4px;
-  font-size: 13px;
-  letter-spacing: 1.2px;
+  width: auto;
+  min-width: 0;
+  height: 32px;
+  margin-top: 4px;
+  padding: 0 16px;
+  --gpFocusBorderRadius: 999px;
+  --focus-ring-border-radius: 999px;
+  color: rgba(226, 231, 237, 0.82);
+  background: transparent;
+  font-size: 12.75px;
+  font-weight: 700;
+  letter-spacing: 0.42px;
+  text-transform: uppercase;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+  transition: background 90ms ease, color 90ms ease;
 }
 
 .sgdbGamepad .sgdbGamepadTab:nth-child(2) {
-  width: 152px;
-  min-width: 152px;
+  width: auto;
+  min-width: 0;
 }
 
 .sgdbGamepad .sgdbGamepadTab.selected {
-  padding: 0 4px;
-  color: #07111d;
-  background: #f8f8f4;
+  color: #f3f5f7;
+  background: #30363d;
+  box-shadow: none;
 }
 
-.sgdbGamepad .sgdbManageTab {
-  opacity: 0.9;
-  cursor: default;
-  pointer-events: none;
+.sgdbGamepad .sgdbGamepadTab.selected.contentFocus {
+  color: #f3f5f7;
+  background: #30363d;
+}
+
+.sgdbGamepad .sgdbGamepadTab:not(.selected):hover,
+.sgdbGamepad .sgdbGamepadTab:not(.selected):focus-visible,
+.sgdbGamepad .sgdbGamepadTab:not(.selected).gpfocus {
+  color: rgba(242, 246, 250, 0.86);
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.sgdbGamepad .sgdbGamepadTab.gpfocus,
+.sgdbGamepad .sgdbGamepadTab:focus-visible,
+.sgdbGamepad .sgdbGamepadTab.gpfocus.selected,
+.sgdbGamepad .sgdbGamepadTab:focus-visible.selected {
+  outline: 0 !important;
+  border-radius: 999px !important;
+  box-shadow: none !important;
+}
+
+.sgdbGamepad .sgdbGamepadTab *,
+.sgdbGamepad .sgdbGamepadTab *::before,
+.sgdbGamepad .sgdbGamepadTab *::after {
+  border-radius: 999px !important;
+}
+
+.sgdbGamepad .sgdbGamepadTab.gpfocus::before,
+.sgdbGamepad .sgdbGamepadTab.gpfocus::after,
+.sgdbGamepad .sgdbGamepadTab:focus-visible::before,
+.sgdbGamepad .sgdbGamepadTab:focus-visible::after,
+.sgdbGamepad .sgdbGamepadTab:not(.selected).gpfocus::before,
+.sgdbGamepad .sgdbGamepadTab:not(.selected).gpfocus::after,
+.sgdbGamepad .sgdbGamepadTab.gpfocus > *,
+.sgdbGamepad .sgdbGamepadTab:focus-visible > * {
+  border: 0 !important;
+  border-radius: 999px !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+}
+
+.sgdbGamepad .sgdbGamepadTab [class*="Focus"],
+.sgdbGamepad .sgdbGamepadTab [class*="focus"],
+.sgdbGamepad .sgdbGamepadTab [class*="Highlight"],
+.sgdbGamepad .sgdbGamepadTab [class*="highlight"],
+.sgdbGamepad .sgdbGamepadTab div {
+  border-radius: 999px !important;
+  clip-path: inset(0 round 999px) !important;
+}
+
+.sgdbGamepad .sgdbGamepadTab.selected.tabFocus:hover,
+.sgdbGamepad .sgdbGamepadTab.selected.tabFocus.gpfocus,
+.sgdbGamepad .sgdbGamepadTab.selected.tabFocus:focus-visible {
+  color: #f3f5f7;
+  background: #30363d;
+  box-shadow: none;
+}
+
+.sgdbGamepad .sgdbGamepadTab.selected.contentFocus:hover,
+.sgdbGamepad .sgdbGamepadTab.selected.contentFocus.gpfocus,
+.sgdbGamepad .sgdbGamepadTab.selected.contentFocus:focus-visible {
+  color: #f3f5f7;
+  background: #30363d;
+  box-shadow: none;
 }
 
 .sgdbSettingsPage {
@@ -1222,6 +1362,7 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
   flex-direction: column;
   width: 100%;
   min-height: 100%;
+  background: transparent;
 }
 
 .spinnyboi {
@@ -1279,27 +1420,47 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
 
 .sgdbGamepad .sgdb-asset-toolbar {
   display: grid;
-  grid-template-columns: 180px 1fr 104px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 28px;
-  min-height: 68px;
-  padding: 0 36px;
-  background: #060a10;
-  border-bottom: 1px solid rgba(102, 192, 244, 0.08);
+  gap: 32px;
+  min-height: 50px;
+  padding: 0 46px;
+  background: transparent;
+  border: 0;
 }
 
 .sgdbGamepad .sgdb-asset-toolbar .filter-buttons {
-  width: 180px;
+  width: auto;
 }
 
-.sgdbGamepad .sgdbFilterMainButton {
-  width: 180px;
-  height: 48px;
-  min-width: 180px;
-  padding: 0;
+.sgdbGamepad .sgdbFilterMainButton,
+.sgdbGamepad .sgdbResetButton {
+  width: auto;
+  height: 32px;
+  min-width: 0;
+  padding: 0 16px;
   border-radius: 999px;
-  font-size: 15px;
-  letter-spacing: 1.2px;
+  color: rgba(226, 231, 237, 0.82);
+  background: transparent;
+  font-size: 12.75px;
+  font-weight: 700;
+  letter-spacing: 0.42px;
+  text-transform: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+  box-shadow: none;
+}
+
+.sgdbGamepad .sgdbFilterMainButton.selected,
+.sgdbGamepad .sgdbFilterMainButton:hover,
+.sgdbGamepad .sgdbFilterMainButton.gpfocus,
+.sgdbGamepad .sgdbFilterMainButton:focus-visible,
+.sgdbGamepad .sgdbResetButton:hover,
+.sgdbGamepad .sgdbResetButton.gpfocus,
+.sgdbGamepad .sgdbResetButton:focus-visible {
+  color: #f3f5f7;
+  background: #30363d !important;
+  box-shadow: none !important;
 }
 
 .sgdbSliderWithMarks {
@@ -1309,7 +1470,7 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
 
 .sgdbGamepad .sgdb-asset-toolbar .size-slider {
   padding: 0;
-  min-height: 34px;
+  min-height: 30px;
   display: flex;
   align-items: center;
   background: transparent !important;
@@ -1320,15 +1481,19 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
 .sgdbResetButton {
   display: grid;
   place-items: center;
-  height: 48px;
-  min-width: 104px;
-  padding: 0 18px;
+  height: 32px;
+  min-width: 0;
+  padding: 0 16px;
   border: 0;
   border-radius: 999px;
-  font-size: 15px;
-  font-weight: 900;
-  letter-spacing: 1.1px;
+  color: rgba(226, 231, 237, 0.82);
+  background: transparent;
+  font-size: 12.75px;
+  font-weight: 700;
+  letter-spacing: 0.42px;
   text-transform: uppercase;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
   cursor: pointer;
 }
 
@@ -1344,9 +1509,10 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
   display: flex;
   flex-direction: column;
   gap: 0;
-  min-height: 48px;
-  padding: 7px 36px;
-  background: #15222c;
+  min-height: 30px;
+  padding: 0 42px;
+  background: transparent;
+  border: 0;
   box-sizing: border-box;
 }
 
@@ -1391,31 +1557,200 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
 
 .sgdbGamepad .sgdbGamepadFilterToggles {
   display: flex;
-  gap: 8px;
+  gap: 30px;
   width: 100%;
+  justify-content: center;
 }
 
 .sgdbGamepad .sgdbFilterToggle {
-  flex: 1;
-  height: 38px;
+  flex: 0 0 auto;
+  height: 32px;
   min-width: 0;
-  padding: 0 12px;
-  font-size: 13px;
-  letter-spacing: 1.2px;
+  padding: 0 16px;
+  color: rgba(226, 231, 237, 0.82);
+  background: transparent;
+  font-size: 12.75px;
+  font-weight: 700;
+  letter-spacing: 0.42px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+  box-shadow: none;
+}
+
+.sgdbGamepad .sgdbFilterToggle.selected,
+.sgdbGamepad .sgdbFilterToggle:hover,
+.sgdbGamepad .sgdbFilterToggle.gpfocus,
+.sgdbGamepad .sgdbFilterToggle:focus-visible {
+  color: #f3f5f7;
+  background: #30363d !important;
+  box-shadow: none !important;
 }
 
 .sgdbGamepad .sgdbMoreButton {
-  width: 128px;
-  height: 48px;
+  width: auto;
+  min-width: 92px;
+  height: 32px;
+  padding: 0 16px;
   margin: 4px auto var(--gamepadui-current-footer-height, 24px);
-  font-size: 16px;
-  letter-spacing: 1.6px;
+  color: rgba(226, 231, 237, 0.82);
+  background: transparent;
+  font-size: 12.75px;
+  font-weight: 700;
+  letter-spacing: 0.42px;
   text-transform: uppercase;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+  box-shadow: none;
+}
+
+.sgdbGamepad .sgdbMoreButton:hover,
+.sgdbGamepad .sgdbMoreButton.gpfocus,
+.sgdbGamepad .sgdbMoreButton:focus-visible {
+  color: #f3f5f7;
+  background: #30363d !important;
+  box-shadow: none !important;
+}
+
+.sgdbManageGrid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.72fr) minmax(420px, 1.78fr);
+  grid-template-areas:
+    "grid wide"
+    "grid logo"
+    "icon logo"
+    "hero hero";
+  gap: 18px 26px;
+  width: 100%;
+  padding: 16px 42px 44px;
+  box-sizing: border-box;
+}
+
+.sgdbManagePanel {
+  min-width: 0;
+}
+
+.sgdbManagePanel h2 {
+  margin: 0 0 8px;
+  color: rgba(242, 246, 250, 0.9);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 2.4px;
+  line-height: 1.1;
+  text-transform: uppercase;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.sgdbManagePanelCapsule {
+  grid-area: grid;
+}
+
+.sgdbManagePanelWide {
+  grid-area: wide;
+}
+
+.sgdbManagePanelLogo {
+  grid-area: logo;
+}
+
+.sgdbManagePanelHero {
+  grid-area: hero;
+}
+
+.sgdbManagePanelIcon {
+  grid-area: icon;
+}
+
+.sgdbManagePreview,
+.sgdbManageMissing {
+  display: grid;
+  position: relative;
+  place-items: center;
+  overflow: hidden;
+  width: 100%;
+  border: 1px solid rgba(156, 171, 186, 0.72);
+  color: #8f98a8;
+  background: rgba(5, 10, 15, 0.5);
+  box-sizing: border-box;
+}
+
+.sgdbManagePreview.type-grid_p {
+  aspect-ratio: 2 / 3;
+  max-height: 460px;
+}
+
+.sgdbManagePreview.type-grid_l {
+  aspect-ratio: 92 / 43;
+}
+
+.sgdbManagePreview.type-logo {
+  min-height: 108px;
+  aspect-ratio: 5 / 1;
+}
+
+.sgdbManagePreview.type-hero {
+  aspect-ratio: 16 / 5;
+}
+
+.sgdbManagePreview.type-icon {
+  width: 132px;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+}
+
+.sgdbManageImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.sgdbManageImage.type-grid_p,
+.sgdbManageImage.type-grid_l,
+.sgdbManageImage.type-hero {
+  object-fit: cover;
+}
+
+.sgdbManageImage.type-logo,
+.sgdbManageImage.type-icon {
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+.sgdbManageMissing {
+  min-height: 96px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.sgdbManagePanelCapsule .sgdbManageMissing {
+  aspect-ratio: 2 / 3;
+  min-height: 260px;
+}
+
+.sgdbManagePanelWide .sgdbManageMissing {
+  aspect-ratio: 92 / 43;
+}
+
+.sgdbManagePanelLogo .sgdbManageMissing {
+  min-height: 108px;
+  aspect-ratio: 5 / 1;
+}
+
+.sgdbManagePanelHero .sgdbManageMissing {
+  aspect-ratio: 16 / 5;
+}
+
+.sgdbManagePanelIcon .sgdbManageMissing {
+  width: 132px;
+  aspect-ratio: 1 / 1;
 }
 
 .sgdbResultsState {
   align-self: flex-start;
-  margin: 12px 30px 0;
+  margin: -10px 30px 2px;
   padding: 0;
   border: 0;
   color: #8f98a8;
@@ -1425,11 +1760,15 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
   text-align: left;
 }
 
+.sgdbGamepad .sgdbGamepadFilterNotice + .sgdbResultsState {
+  margin-top: -14px;
+}
+
 .sgdbGrid {
   display: grid;
-  padding: 14px 34px var(--gamepadui-current-footer-height, 34px);
-  row-gap: 1em;
-  column-gap: 0.65em;
+  padding: 10px 42px var(--gamepadui-current-footer-height, 34px);
+  row-gap: 1.22em;
+  column-gap: 0.95em;
   width: 100%;
   justify-content: space-evenly;
   grid-auto-flow: dense;
@@ -1458,6 +1797,7 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
   align-items: center;
   flex-wrap: wrap;
   position: relative;
+  perspective: 900px;
 }
 
 .image-wrap.sgdbAsset {
@@ -1469,7 +1809,9 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
   background: url('/images/defaultappimage.png') center center / cover, #05070a;
   cursor: pointer;
   outline: 2px solid transparent;
-  transition: outline-color ease-in-out 160ms, transform ease-out 160ms;
+  border-radius: 3px;
+  box-shadow: 0 7px 18px rgba(0, 0, 0, 0.22);
+  transition: outline-color ease-in-out 160ms, transform ease-out 160ms, box-shadow ease-out 160ms;
 }
 
 .image-wrap.sgdbAsset.type-logo {
@@ -1485,82 +1827,9 @@ body:has(#sgdb-wrap) [class*="closeButton"]:hover {
 .image-wrap.sgdbAsset.gpfocus,
 .image-wrap.sgdbAsset:focus-visible {
   z-index: 4;
-  outline-color: rgba(255, 255, 255, 0.55);
-  transform: scale(1.018);
-}
-
-.sgdbManageGrid {
-  display: grid;
-  grid-template-columns: minmax(220px, 30%) minmax(0, 1fr);
-  grid-auto-flow: dense;
-  gap: 22px;
-  width: 100%;
-  padding: 24px 36px calc(var(--gamepadui-current-footer-height, 34px) + 16px);
-  box-sizing: border-box;
-}
-
-.sgdbManagePanel {
-  min-width: 0;
-}
-
-.sgdbManagePanel h2 {
-  margin: 0 0 10px;
-  color: rgba(255, 255, 255, 0.92);
-  font-size: 19px;
-  font-weight: 900;
-  letter-spacing: 2.4px;
-  text-transform: uppercase;
-}
-
-.sgdbManagePanelCapsule {
-  grid-row: span 3;
-}
-
-.sgdbManagePanelWide,
-.sgdbManagePanelHero,
-.sgdbManagePanelLogo {
-  grid-column: 2;
-}
-
-.sgdbManagePanelIcon {
-  grid-column: 1;
-}
-
-.sgdbManagePreview {
-  position: relative;
-  overflow: hidden;
-  background: #070d14;
-  outline: 2px solid rgba(142, 158, 176, 0.55);
-}
-
-.sgdbManagePreview.type-grid_p {
-  aspect-ratio: 2 / 3;
-  max-height: 68vh;
-}
-
-.sgdbManagePreview.type-grid_l,
-.sgdbManagePreview.type-hero {
-  aspect-ratio: 92 / 43;
-}
-
-.sgdbManagePreview.type-logo {
-  height: 150px;
-}
-
-.sgdbManagePreview.type-icon {
-  width: 130px;
-  aspect-ratio: 1 / 1;
-}
-
-.sgdbManageMissing {
-  display: grid;
-  place-items: center;
-  min-height: 140px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #8f98a8;
-  background: rgba(0, 0, 0, 0.18);
-  font-size: 18px;
-  font-weight: 700;
+  outline-color: rgba(226, 231, 237, 0.66);
+  transform: translate3d(0, -3px, 18px) scale(1.018);
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.44), 0 0 0 1px rgba(255, 255, 255, 0.16);
 }
 
 .sgdbExternalLinkButton {
