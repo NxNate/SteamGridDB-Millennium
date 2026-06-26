@@ -447,14 +447,6 @@ function get_current_artwork(appid)
                 '"length":' .. tostring(item.length or 0),
             }
 
-            if (item.length or 0) <= 12582912 then
-                local content = utils.read_file(item.path)
-                if content and content ~= "" then
-                    local data_url = "data:" .. mime_for(item.extension) .. ";base64," .. utils.base64_encode(content)
-                    table.insert(fields, '"dataUrl":"' .. json_escape(data_url) .. '"')
-                end
-            end
-
             table.insert(parts, '"' .. key .. '":{' .. table.concat(fields, ",") .. "}")
         end
     end
