@@ -2,6 +2,10 @@
 
 SteamGridDB for Millennium is a Steam artwork browser and manager built for the Millennium plugin loader. It lets you search SteamGridDB from inside Steam, browse artwork by type, and apply new library assets without leaving the client.
 
+![GitHub Downloads (all assets, all releases)](
+https://img.shields.io/github/downloads/DevsNate/SteamGridDB-Millennium/total
+)
+
 ## Features
 
 - Search SteamGridDB games from inside Steam.
